@@ -1,0 +1,84 @@
+name: AH Cloud Dedicated Server (5-Hour Auto-Restart)
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Auto triggers every 5 hours
+    - cron: '0 */5 * * *'
+  repository_dispatch:
+    types: [restart-server]
+
+jobs:
+  run-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 320 # GitHub Actions hard max is 360m
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm install
+
+      - name: Install Cloudflare Tunnel (cloudflared)
+        run: |
+          wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb
+          sudo dpkg -i cloudflared-linux-amd64.deb
+          cloudflared --version
+
+      - name: Start AH Cloud Server & Public Cloudflare Tunnel
+        run: |
+          echo "Starting Node.js Backend Server on port 8080..."
+          node server.js > server.log 2>&1 &
+          SERVER_PID=$!
+          sleep 4
+
+          echo "Starting Cloudflare Quick Tunnel..."
+          cloudflared tunnel --url http://localhost:8080 > tunnel.log 2>&1 &
+          TUNNEL_PID=$!
+
+          # Wait for tunnel public URL to appear
+          echo "Waiting for public HTTPS tunnel URL..."
+          for i in {1..30}; do
+            TUNNEL_URL=$(grep -o 'https://[-a-zA-Z0-9.]*\.trycloudflare\.com' tunnel.log | head -n 1)
+            if [ -n "$TUNNEL_URL" ]; then
+              break
+            fi
+            sleep 2
+          done
+
+          echo "=========================================================="
+          echo "🚀 AH CLOUD SERVER IS LIVE AND ACCESSIBLE PUBLICLY AT:"
+          echo "$TUNNEL_URL"
+          echo "=========================================================="
+          echo "TUNNEL_URL=$TUNNEL_URL" >> $GITHUB_ENV
+          echo "### 🚀 Live Server URL: $TUNNEL_URL" >> $GITHUB_STEP_SUMMARY
+
+          # Run 4 hours 55 minutes (17700 seconds)
+          RUNTIME_SECONDS=17700
+          echo "Server will run for 4h 55m and then automatically trigger rotation..."
+          
+          # Monitor loop
+          for ((elapsed=0; elapsed<RUNTIME_SECONDS; elapsed+=60)); do
+            sleep 60
+            if ! kill -0 $SERVER_PID 2>/dev/null; then
+              echo "Server process died unexpectedly. Logs:"
+              cat server.log
+              exit 1
+            fi
+          done
+
+          echo "5-hour interval reached. Triggering next workflow dispatch..."
+          curl -s -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/${{ github.repository }}/dispatches \
+            -d '{"event_type": "restart-server"}' || true
+
+          echo "Handing off cleanly to new instance."

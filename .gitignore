@@ -1,0 +1,7 @@
+node_modules/
+.data/
+server.log
+tunnel.log
+*.deb
+.env.local
+.DS_Store
